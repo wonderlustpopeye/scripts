@@ -1,0 +1,29 @@
+ #####   https://access.redhat.com/articles/5348961#openshift-4-12
+    https://docs.openshift.com/container-platform/4.12/rest_api/config_apis/apiserver-config-openshift-io-v1.html
+
+    https://rcarrata.com/openshift/regenerate-kubeconfig/
+
+    ---- Obtaining node kubeconfig ----
+    https://access.redhat.com/solutions/4845381
+
+    ----re-create kubeconfig ----
+     https://access.redhat.com/solutions/5286371
+
+    ---- replace certificate authority for system:admin kubeconfig ----
+    https://access.redhat.com/solutions/6054981
+
+    ---- grating cluster admin access to user ----
+    https://docs.openshift.com/container-platform/4.11/authentication/using-rbac.html#creating-cluster-admin_using-rbac
+
+    ---- removing kubeadmin user ----
+    https://docs.openshift.com/container-platform/4.12/authentication/remove-kubeadmin.html
+
+
+    https://gist.github.com/rcarrata/016da295c1421cccbfbd66ed9a7922bc#file-regenerate-kubeconfig-sh-L30
+    https://github.com/kubernetes/kubectl/blob/master/pkg/cmd/certificates/certificates.go#L212-L276
+    https://github.com/openshift/oc/blob/master/pkg/cli/admin/admin.go#L76-L81
+
+
+    ---- trusted certs ----
+    https://access.redhat.com/solutions/5952301
+

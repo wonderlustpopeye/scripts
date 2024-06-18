@@ -1,0 +1,62 @@
+spec:
+  audit:
+ customRules:                        1
+ - group: system:authenticated:oauth
+profile: WriteRequestBodies
+ - group: system:authenticated
+profile: AllRequestBodies
+ profile: Default
+
+
+
+
+CA trust audit logs should be recorded under the below APIs.
+
+
+
+~~~
+
+GROUP:   certificates.k8s.io
+
+KIND:    CertificateSigningRequest
+
+VERSION:  v1
+
+12:42
+
+
+
+GROUP:   config.openshift.io
+
+KIND:    APIServer
+
+VERSION:  v1
+
+~~~
+
+
+example :
+spec:
+  audit:
+ customRules:                        1
+ - group: system:authenticated:oauth
+profile: WriteRequestBodies
+ - group: system:authenticated
+profile: AllRequestBodies
+ profile: Default
+"
+
+reference r:eference :
+https://access.redhat.com/documentation/en-us/openshift_container_platform/4.10/html/security_and_compliance/audit-log-policy-config
+
+ kube-api-server operator.
+
+
+create CSR on node and approved manually.
+The logs was available in machine-approver pod in openshift-cluster-machine-approver namespace where as CSR name and it get approved was present,
+Using the default audit policy.
+
+But the name of approver was not present in the logs will test the same with increasing the audit logs policy.
+If you have WriteRequestBodies set in your cluster please try to create and approve the cert and check the logs of openshift-cluster-machine-approver.
+
+

@@ -1,0 +1,262 @@
+#!/bin/bash
+## Author :Unknown
+## Desc   : This script Searches through openshift (and some key 3rd party software) namespaces and scrapes each secret looking for certificates.
+##        : Once found the script extracts the details from the certificate and identifies it has been renewed since the last run of the script or is a brand new cert.
+##        : It produces 3 files containing the metadata in tab delimited form, detailed cert entries including pem, and a file which contains only the meta details of new certs within the cluster.
+## Update : 03/04/24 : Updated to add cluster name to each entry for better filtering in PowerBI
+##        :          : Added a check to see if file contains clustername to aid move from one format to the other
+
+## Check to see if a certificate entry is a new one
+checknew() {
+  search="$1"
+
+  header=$( head -1 "${certdir}/${lastmetafile}" | grep -c CLUSTERNAME )
+  if [[ $header == "0" ]] ; then 
+    cat "${certdir}/${lastmetafile}" | awk -F"\t" '{ print $4 }' |grep -F "$search" > /dev/null
+    echo "Old format"
+  else
+    cat "${certdir}/${lastmetafile}" | awk -F"\t" '{ print $5 }' |grep -F "$search" > /dev/null    
+    echo "New format"
+  fi
+  if [[ $? -ne 0 ]] ; then 
+    echo "$search is a new one!!!!"
+    return 1
+  else
+    return 0 
+  fi
+}
+
+## Check to see if a certificate entry is reissued
+checkreissue() {
+  search="$1"
+
+  cat "${certdir}/${lastmetafile}" | awk -F"\t" '{ print $NF }' |grep -F "$search" > /dev/null
+  if [[ $? -ne 0 ]] ; then 
+    echo "$search is a reissue!!!!"
+    return 1
+  else
+    return 0 
+  fi
+}
+
+## Convert the date extracted from the cert via openssl is in the required format for output
+convdate() {
+    indate=$( echo $1 | awk -F= '{ print $NF }' )
+
+    unixdate=$( date -d "$indate" +%s )
+    outdate=$( date -d "@$unixdate" +%d/%m/%Y )
+    
+    echo $outdate
+}
+
+checkselfsigned() {
+  issue=$( echo $1 | sum | awk '{ print $1 }' )
+  subj=$( echo $2 | sum |  awk '{ print $1 }' ) 
+
+  if [[ $issue == $subj ]] ; then 
+    return 1
+  else
+    return 0 
+  fi
+}
+
+
+## Main
+
+## Check if the parms are correct
+if [[ $1 != "meta" && $1 != "detail" && $1 != "both" ]] ; then
+  echo "ERR: You must pass a parameter of either meta, detail or both. RC=8"
+  exit 8 
+fi
+
+options=$1
+clustername=$( oc cluster-info | grep -Po "caas[^.]*" )
+issuercaarray=()
+CAflag="NO"
+
+## Check if you are logged into a cluster
+if [[ -z $clustername ]] ; then 
+  echo "ERR: You must be logged into a cluster to run this script. RC=8"
+  exit 8 
+fi
+
+
+## Set vars fopr output files/namespace list etc
+certdir="../cert-details"
+rundate=$( date +'%Y%m%d' )
+metafile="${clustername}-meta-${rundate}.out"
+detailfile="${clustername}-detail-${rundate}.out"
+newcertfile="${clustername}-newcerts-${rundate}.out"
+cafile="${clustername}-ca-detail-${rundate}.out"
+lastmetafile="${clustername}-meta-last.out"
+nslist=$( oc get ns -o custom-columns=":metadata.name" | egrep "^openshift-|-aqua-|-gitops-|-dynatrace-|kube-system|istio-system" ) 
+
+
+## Look for the previous meta file in the repo
+if [[ ! -f "${certdir}/${lastmetafile}" ]] ; then
+  echo "INF: Cannot find the previous meta file : ${certdir}/${lastmetafile} cannot identify new certificates"
+  lastmetafileexists="NO"
+else
+  lastmetafileexists="YES"
+fi
+
+## Initialise output files
+if [[ $options == "detail" || $options == "both" ]] ; then
+  > $detailfile
+  > $newcertfile
+  if [[ $CAflag == "YES" ]] ; then
+    > $cafile
+  fi
+fi
+if [[ $options == "meta" || $options == "both" ]] ; then 
+  echo -e "CLUSTERNAME\tNAMESPACE\tNAME\tKEY\tSUBJECT\tSTART\tEXPIRY\tISSUER\tNEWCERT\tREISSUED\tCA\tSELF-SIGNED\tSERIAL" > $metafile
+  echo -e "CLUSTERNAME\tNAMESPACE\tNAME\tKEY\tSUBJECT\tSTART\tEXPIRY\tISSUER\tNEWCERT\tREISSUED\tCA\tSELF-SIGNED\tSERIAL" > $newcertfile
+fi
+
+newcertflag="N"
+
+
+
+## Go through the namespaces in the list
+for n in $( echo $nslist ) ; do 
+  ## grab the secrets in the namespace 
+  oc get secrets -n $n -o go-template='{{range .items}}{{if or (eq .type "Opaque") (eq .type "kubernetes.io/tls") (eq .type "istio.io/ca-root")  }}{{.metadata.namespace}}{{" "}}{{.metadata.name}}{{" "}}{{"\n"}}{{end}}{{end}}' > ./nssecrets.out
+  while read namespace name ; do 
+    ## For each secret go and loop through the keys
+    for i in $( oc get secrets $name -n $namespace -o json | jq -r '.data |keys | .[]' | sed -e "s/\r//g" ) ; do
+      echo "$name - $namespace - $i"
+
+      ## Grab the data from the key
+      cert=$( oc get secrets $name -n $namespace -o json | jq -r '.data | with_entries(select(.key == "'$i'")) | .[]' |  sed -e "s/\r//g"  )
+
+      ## If it isnt empty then try and decode it as a certificate
+      if [[ ! -z $cert ]] ; then 
+        echo $cert | base64 -d | openssl x509 -text > /dev/null 2>&1
+
+        ## If it is a certificate then process it, if it isnt then skip to the next
+        if [[ $? -eq 0 ]] ; then 
+          ## Extract the gubbins to create the detail file
+          if [[ $options == "both" || $options == "detail" ]] ; then 
+            echo -e "NAMESPACE\tNAME\tKEY" >> $detailfile
+            echo -e "-----------------------------------------------------------" >> $detailfile
+            echo -e "$namespace\t $name\t$i\t" >> $detailfile
+            echo -e "-----------------------------------------------------------" >> $detailfile
+            echo $cert | base64 -d | openssl x509 -subject -issuer -startdate -enddate -purpose -ext nsCertType,keyUsage,basicConstraints >> $detailfile
+            echo -e "##################\n" >> $detailfile
+            issuer=$( echo $cert | base64 -d | openssl x509 -issuer -noout | grep -Po "CN = \K.*[\s]")
+            subject=$( echo $cert | base64 -d | openssl x509 -subject -noout | grep -Po "CN = \K.*[\s]" )
+
+            ## If this looks to be a CA...
+            if [[ $CAflag == "YES" ]] ; then
+              if [[ $issuer == $subject ]] ; then
+                issuernospace=$( echo $issuer | sed 's/ /_/g' )
+                echo ${issuercaarray[@]} | grep -qw "$issuernospace"          
+                if [[ $? -ne 0 ]] ; then
+                  issuercaarray[${#issuercaarray[@]}]="$issuernospace"
+                  echo -e "NAMESPACE\tNAME\tKEY" >> $cafile
+                  echo -e "-----------------------------------------------------------" >> $cafile
+                  echo -e "$namespace\t $name\t$i\t" >> $cafile
+                  echo -e "-----------------------------------------------------------" >> $cafile
+                  echo $cert | base64 -d | openssl x509 -subject -issuer -startdate -enddate -purpose -ext nsCertType,keyUsage,basicConstraints >> $cafile
+                  echo -e "##################\n" >> $cafile
+                fi
+              fi
+            fi
+          fi
+
+          ## Now create the metafile and work out some things about this cert in comparison to last run
+          if [[ $options == "meta" || $options == "both" ]] ; then
+            ## Grab some fields
+            subject=$( echo $cert | base64 -d | openssl x509 -noout -subject )
+            begin=$( echo $cert | base64 -d | openssl x509 -noout -startdate )
+            expire=$( echo $cert | base64 -d | openssl x509 -noout -enddate )
+            issuer=$( echo $cert | base64 -d | openssl x509 -noout -issuer )
+            serial=$( echo $cert | base64 -d | openssl x509 -noout -serial | awk -F"=" '{ print $2 }' )
+            CA=$( echo $cert | base64 -d | openssl x509 -noout -ext basicConstraints | grep -c "CA:TRUE" )
+            subjkeyid=$( echo $cert | base64 -d | openssl x509 -noout -ext subjectKeyIdentifier  | grep -v ^X509 | awk '{ print $NF }'  )
+            authkeyid=$( echo $cert | base64 -d | openssl x509 -noout -ext authorityKeyIdentifier | grep -v ^X509 | sed 's/keyid://' | awk '{ print $NF }' )     
+
+            ## Check to see if this is a new Subject CN compared to last month
+            if [[ $lastmetafileexists == "YES" ]] ; then 
+              newcertout="N"
+              checknew "$subject"
+              newcert=$?
+              if [[ $newcert -eq 1 ]] ; then 
+                newcertout="Y"
+              fi
+            else 
+              newcertout="TBA"
+            fi
+
+            ## Check if the cert has been reissued since the last run
+            if [[ $lastmetafileexists == "YES" ]] ; then 
+              reissuecertout="N"
+              checkreissue "$serial"
+              reissuecert=$?
+              if [[ $reissuecert -eq 1 && $newcertout == "N" ]] ; then 
+                reissuecertout="Y"
+              fi
+            else 
+              reissuecertout="TBA"
+            fi
+
+            ## Work out if this is a self signed cert
+            ## If either key is empty use the name instead of the key
+            if [[ -z $authkeyid || -z $subjkeyid ]] ; then 
+              ## Escape the = to avoid issues when performing comparisons
+              sanitisedissuer=$( echo $issuer | sed -e 's/issuer=//' -e 's/=//g' )
+              sanitisedsubject=$( echo $subject | sed -e 's/subject=//' -e 's/=//g' )
+              checkselfsigned "$sanitisedissuer" "$sanitisedsubject"
+              if [[ $? -eq 1 ]] ; then 
+                selfsigned="Y"
+              else
+                selfsigned="N"
+              fi
+            else
+              if [[ $subjkeyid == $authkeyid ]] ; then 
+                selfsigned="Y"
+              else
+                selfsigned="N"
+              fi            
+            fi 
+
+            ## Maybe its a CA ?
+            cacertout="N"
+            if [[ $CA -gt 0 ]] ; then
+              cacertout="Y"
+            fi
+
+            ## Convert dates prior to output
+            beginout=$( convdate "$begin" )
+            expireout=$( convdate "$expire" )
+
+            ## Output the meta and newcert entries for this cert
+            echo -e "$clustername\t$namespace\t$name\t$i\t$subject\t$beginout\t$expireout\t$issuer\t$newcertout\t$reissuecertout\t$cacertout\t$selfsigned\t$serial" >> $metafile
+            if [[ $newcertout == "Y" ]] ; then 
+              echo -e "$clustername\t$namespace\t$name\t$i\t$subject\t$beginout\t$expireout\t$issuer\t$newcertout\t$reissuecertout\t$cacertout\t$selfsigned\t$serial" >> $newcertfile
+              newcertflag="Y"
+            fi
+          fi
+        fi
+      fi
+    done
+  done < ./nssecrets.out
+done
+
+## If no new certs have been found in this run, then pop a line in the newcertfile so whoever looks at knows.
+if [[ $newcertflag == "N" ]] ; then 
+  echo "INFO: NO NEW CERTS HAVE BEEN IDENTIFIED" > $newcertfile
+fi 
+  
+## Shuffle the meta file
+echo
+echo "INF: Copying metadata file to ${certdir}/${lastmetafile}"
+cp ./${metafile} ${certdir}/${lastmetafile}
+if [[ $? -eq 0 ]] ; then 
+  echo "!!! Check in this branch and merge !!!
+
+else
+  echo "ERROR: File copy did not succeed please investigate"
+fi 
+
+

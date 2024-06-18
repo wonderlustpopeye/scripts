@@ -1,0 +1,99 @@
+0105f - Cluster Admin Certificates cannot be revoked
+QE029-R0108k - OCP CSR Approvals
+QE029-R0105k - Privileged accounts on the cluster nodes not managed by the Cyberark
+
+Problem Statement:
+The API Server manages the OpenShift Cluster configuration, including secrets, for all Cluster Nodes and Applications running in the Cluster.
+
+OpenShift supports authentication to the API Server using Certificates or User Accounts managed in Active Directory.
+
+Certificate Authentication is widely used by cluster components within the cluster and as an emergency account for external access into the cluster, and should only be used from the bastion server.
+
+Certificates can be used to authenticate as Cluster Admin.
+
+There are many Certificate Authorities (CAs) trusted by the API Server.It is possible to add new CAs to the list trusted by the API Server.
+
+It is possible for a Certificate Signing Request (CSR) to be signed by the cluster that allows external access to the cluster.
+
+It is possible for a Cluster Admin to obtain and use keys/certificates from components within the Cluster.
+
+Exploits
+E1 - A Cluster Admin can request and approve a CSR which would allow them to authenticate to the cluster as cluster admin anonymously, such that it is not possible to trace who authenticated. This exploit can be executed outside of the bastion server, where there are fewer controls (e.g. PSM), because cluster admin can login from any accessible network.
+
+This issue impacts all Kubernetes clusters and is not limited to just openshift:
+
+(open since 2015): https://github.com/kubernetes/kubernetes/issues/18982
+
+Impact: Remediation requires a full cluster rebuild.  It is not possible to revoke previously signed certificates or modify/update the Certificate Authority kube-csr-signer
+
+Mitigation part 1: Reactive ONLY: Identify if Audit logs can be used to determine when the API Server receives a CSR request and when a CSR request is approved. Request SIEM Controls are created to Alert when a CSR request is made and when it is approved. In addition, when Loki is implemented, use Loki Alerts.
+
+Mitigation part 2: This issue can be addressed by the procedure published for CA rotation on FIPS compliant environments https://access.redhat.com/articles/regenerating_cluster_certificates.
+
+The Article suggests that this is for FIPS compliant environments only, however the PMR has confirmed that it applies to NON fips environments also.
+
+Both PART 1 and PART 2 should be applied.
+
+
+E2 - A Cluster Admin can create their own Certificate Authority and add this Authority to the trusted CA list, allowing them to authenticate to the cluster as cluster admin anonymously, such that it is not possible to trace who authenticated. This exploit can be executed outside of the bastion server, where there are fewer controls (e.g. PSM), because cluster admin can login from any accessible network.
+
+Mitigation: Regularly validate the trusted CA Bundle and remove any CAs that should not be trusted: https://access.redhat.com/solutions/5952301
+
+Identify if Audit logs can be used to determine when a API Server request is made to update the trusted CA list. Request SIEM Controls are created to create Alerts. In addition, when Loki is implemented, use Loki Alerts.
+
+The E1 Part 2 mitigation does not address this issue. Whenever a new CA is added to the custom CA approved list it must be validated and removed if not required and investigated why/how it was created.
+
+E3 - A Cluster Admin can obtain and use keys/certificates from components within the cluster, for example the master kubeconfig, allowing them to authenticate to the cluster as cluster admin anonymously, such that it is not possible to trace who authenticated. This exploit can be executed outside of the bastion server, where there are fewer controls (e.g. PSM), because cluster admin can login from any accessible network.
+
+Mitigation: Reactive ONLY: Identify if Audit logs can be used to determine when a API Server request is made for sensitive material. Request SIEM Controls are created to create Alerts. In addition, when Loki is implemented, use Loki Alerts.
+
+The E1 Part 2 mitigation must be applied.
+
+E4 - A Cluster Admin could obtain key material for a CA in the trusted list and use it to sign new certificates which can be used to authenticate to the cluster as cluster admin anonymously, such that it is not possible to trace who authenticated. This exploit can be executed outside of the bastion server, where there are fewer controls (e.g. PSM), because cluster admin can login from any accessible network.
+
+Mitigation: Reactive ONLY: Identify if Audit logs can be used to determine when a API Server request is made for sensitive material. Request SIEM Controls are created to create Alerts. In addition, when Loki is implemented, use Loki Alerts.
+
+The E1 Part 2 mitigation must be applied to remediate this issue. Testing must confirm that all CAs trusted by the API Server are renewed.
+
+
+Details
+E1 - A Cluster Admin can request and approve a CSR
+https://access.redhat.com/solutions/5286371
+
+E2 - A Cluster Admin can create their own Certificate Authority and add this Authority to the trusted CA list
+https://access.redhat.com/solutions/6054981
+
+E3 - A Cluster Admin can obtain and use keys/certificates from components within the cluster
+https://access.redhat.com/solutions/4845381
+
+The master kubeconfig, which, if used maliciously, could provide anonymous access as Cluster Administrator to the OCP Cluster.
+
+The API Server does not support the proxy protocol. You cannot determine which certificate or client IP was used to login, from where.
+
+
+Known CAs that can be used to create client certificates used to login as cluster administrator:
+OU = openshift, CN = admin-kubeconfig-signer #### Default Client CA (This can be replaced)
+CN = openshift-kube-apiserver-operator_node-admin-signer #### Created for each Master server (This rotates annually)
+
+
+Despite what the Red Hat document states about the kubeconfig only being usable from the local server– its wrong!!!!
+https://access.redhat.com/solutions/4845381
+Note: the localhost config files will not work if used on hosts other than the master nodes.
+
+This statement is not true. This is trivial to workaround, simply install haproxy locally (or other tcp forwarder) on your laptop and the localhost config file work just fine!!!
+
+Whilst you do need to be a cluster administrator to obtain the Master configuration, once obtained, it can be used to anonymously login for a significant period of time.
+
+To obtain the master configuration simply run:
+oc -n openshift-kube-apiserver extract secret/node-kubeconfigs
+
+
+The issue is further complicated because when you login using a certificate, the Audit logs ONLY SHOW the F5 ip address and not the client IP Address. There is ongoing discussions about this in the k8s community since 2019
+https://github.com/kubernetes/kops/issues/6792
+https://github.com/kubernetes/kubernetes/issues/76928
+
+investigate: proxy protocol is it possible that the F5 could terminate the connection and add appropriate client headers which are supported by the API Server?
+
+In short, its nearly impossible to determine malicious use of a certificate that allows system:admin
+
+E4 - A Cluster Admin could obtain key material for a CA in the trusted list and use it to sign new certificates. This exploit can be executed outside of the bastion server, where there are fewer controls (e.g. PSM), because cluster admin can login from any accessible network.
